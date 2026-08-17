@@ -1,0 +1,134 @@
+#!/usr/bin/env python3
+"""Install skills from this repo into an agent skills directory."""
+
+from __future__ import annotations
+
+import argparse
+import shutil
+import sys
+from pathlib import Path
+
+HOMES = (
+    "~/.agents/skills",
+    "~/.claude/skills",
+    "~/.cursor/skills",
+    "~/.codex/skills",
+)
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="scripts/install-skills",
+        usage="scripts/install-skills [options] [skill ...]",
+    )
+    parser.add_argument(
+        "--target",
+        action="append",
+        metavar="DIR",
+        help="Install target (repeatable). Default: ~/.agents/skills",
+    )
+    parser.add_argument(
+        "--all-homes",
+        action="store_true",
+        help="Install into ~/.agents, ~/.claude, ~/.cursor, and ~/.codex skills dirs",
+    )
+    parser.add_argument(
+        "--mode",
+        default="symlink",
+        choices=("symlink", "copy"),
+        help="symlink or copy. Default: symlink",
+    )
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--force", action="store_true", help="Replace an existing skill")
+    parser.add_argument("--list", action="store_true", help="List available skills and exit")
+    parser.add_argument("skills", nargs="*")
+    return parser.parse_args(argv)
+
+
+def available_skills(root: Path) -> list[str]:
+    skills_root = root / "skills"
+    if not skills_root.is_dir():
+        return []
+    return sorted(
+        path.name for path in skills_root.iterdir() if (path / "SKILL.md").is_file()
+    )
+
+
+def same_real_path(left: Path, right: Path) -> bool:
+    try:
+        return left.resolve(strict=True) == right.resolve(strict=True)
+    except FileNotFoundError:
+        return False
+
+
+def remove_path(path: Path) -> None:
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+    else:
+        shutil.rmtree(path)
+
+
+def install_one(source: Path, target: Path, mode: str, force: bool, dry_run: bool) -> int:
+    if target.exists() or target.is_symlink():
+        if not force:
+            print(f"exists, skipping: {target}", file=sys.stderr)
+            return 0
+        if not target.is_symlink() and same_real_path(source, target):
+            print(f"target is source, skipping: {target}", file=sys.stderr)
+            return 0
+        if dry_run:
+            print(f"remove {target}")
+        else:
+            remove_path(target)
+
+    if not dry_run:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if mode == "symlink":
+            target.symlink_to(source, target_is_directory=True)
+        else:
+            shutil.copytree(source, target)
+
+    prefix = f"would {mode}" if dry_run else mode
+    print(f"{prefix} {source.name} -> {target}")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(sys.argv[1:] if argv is None else argv)
+    root = Path(__file__).resolve().parent.parent
+    available = available_skills(root)
+
+    if args.list:
+        print("\n".join(available))
+        return 0
+
+    selected = available if not args.skills else args.skills
+    missing = [name for name in selected if name not in available]
+    if missing:
+        print(f"unknown skill(s): {', '.join(missing)}", file=sys.stderr)
+        print(f"available: {', '.join(available) or '(none)'}", file=sys.stderr)
+        return 1
+
+    if args.all_homes:
+        targets = list(HOMES)
+    elif args.target:
+        targets = args.target
+    else:
+        targets = ["~/.agents/skills"]
+
+    status = 0
+    for target in targets:
+        target_root = Path(target).expanduser().resolve()
+        for name in selected:
+            status |= install_one(
+                root / "skills" / name,
+                target_root / name,
+                args.mode,
+                args.force,
+                args.dry_run,
+            )
+    return status
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

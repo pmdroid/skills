@@ -1,0 +1,141 @@
+#!/usr/bin/env python3
+"""Run one isolated planner CLI. Prompt on stdin. Print the reply."""
+
+from __future__ import annotations
+
+import argparse
+import os
+import shutil
+import subprocess
+import sys
+
+DEFAULT_MODELS = {
+    "codex": "gpt-5.6-sol",
+    "cursor": "kimi-k3-max",
+    "cursor-agent": "kimi-k3-max",
+}
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(prog="council", description=__doc__)
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    ask = sub.add_parser("ask", help="run one isolated planner")
+    ask.add_argument("--engine", required=True)
+    ask.add_argument("--model")
+    ask.add_argument("--cwd", default=".")
+    ask.add_argument("--timeout", type=int, default=300)
+    ask.add_argument("--bin", help="override executable")
+    ask.add_argument("--dry-run", action="store_true")
+    ask.add_argument("prompt_args", nargs="*")
+
+    sub.add_parser("engines", help="list engines on PATH")
+    args = parser.parse_args()
+    if args.cmd == "engines":
+        return list_engines()
+    return ask_engine(args)
+
+
+def list_engines() -> int:
+    for name, bin_name in (
+        ("claude", "claude"),
+        ("codex", "codex"),
+        ("opencode", "opencode"),
+        ("cursor", "cursor-agent"),
+    ):
+        path = shutil.which(bin_name)
+        model = DEFAULT_MODELS.get(name, "")
+        print(f"{name:10} {'ok' if path else 'missing':7} {model:14} {path or ''}".rstrip())
+    return 0
+
+
+def ask_engine(args: argparse.Namespace) -> int:
+    prompt = " ".join(args.prompt_args).strip() or sys.stdin.read()
+    if not prompt.strip():
+        print("council: empty prompt", file=sys.stderr)
+        return 2
+
+    argv, use_stdin = build_argv(
+        args.engine,
+        args.model or DEFAULT_MODELS.get(args.engine),
+        args.bin,
+        args.cwd,
+    )
+    if args.dry_run:
+        shown = [*argv, "<stdin>"] if use_stdin else [*argv, "<prompt>"]
+        print(" ".join(shown))
+        return 0
+    if not use_stdin:
+        argv = [*argv, prompt]
+    try:
+        result = subprocess.run(
+            argv,
+            cwd=args.cwd,
+            input=prompt if use_stdin else None,
+            text=True,
+            capture_output=True,
+            timeout=args.timeout,
+            env=os.environ.copy(),
+        )
+    except FileNotFoundError:
+        print(f"council: executable not found: {argv[0]}", file=sys.stderr)
+        return 127
+    except subprocess.TimeoutExpired:
+        print(f"council: timed out after {args.timeout}s", file=sys.stderr)
+        return 124
+
+    sys.stdout.write(result.stdout)
+    if result.returncode != 0 and not result.stdout.strip():
+        sys.stderr.write(result.stderr)
+        return result.returncode
+    return 0
+
+
+def build_argv(
+    engine: str, model: str | None, override_bin: str | None, cwd: str
+) -> tuple[list[str], bool]:
+    bin_name = override_bin
+    if engine in {"claude", "claude-code"}:
+        argv = [bin_name or "claude", "-p", "--output-format", "text", "--dangerously-skip-permissions"]
+        if model:
+            argv += ["--model", model]
+        return argv, False
+    if engine == "codex":
+        argv = [
+            bin_name or "codex",
+            "exec",
+            "--skip-git-repo-check",
+            "--dangerously-bypass-approvals-and-sandbox",
+        ]
+        if model:
+            argv += ["-m", model]
+        if cwd and cwd != ".":
+            argv += ["-C", cwd]
+        argv.append("-")
+        return argv, True
+    if engine == "opencode":
+        argv = [bin_name or "opencode", "run", "--auto"]
+        if model:
+            argv += ["-m", model]
+        if cwd and cwd != ".":
+            argv += ["--dir", cwd]
+        return argv, False
+    if engine in {"cursor", "cursor-agent"}:
+        argv = [bin_name or "cursor-agent", "-p", "--force", "--trust", "--mode", "plan"]
+        if model:
+            argv += ["--model", model]
+        if cwd and cwd != ".":
+            argv += ["--workspace", cwd]
+        return argv, False
+    if engine == "generic":
+        if not bin_name:
+            raise SystemExit("council: --bin is required for --engine generic")
+        return [bin_name], True
+    raise SystemExit(f"council: unknown engine {engine!r}")
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except BrokenPipeError:
+        raise SystemExit(0)
