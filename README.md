@@ -1,6 +1,8 @@
 # Agent Skills
 
-Shared skills for coding agents. Clone once, install into Claude Code, Codex, Cursor, or any agent that reads a skills directory.
+Skills for AI coding agents. Follows the [Agent Skills](https://agentskills.io/) format.
+
+[![skills.sh](https://skills.sh/b/pmdroid/skills)](https://skills.sh/pmdroid/skills)
 
 ## Skills
 
@@ -8,32 +10,22 @@ Shared skills for coding agents. Clone once, install into Claude Code, Codex, Cu
 
 ## Install
 
-From this checkout:
-
-```sh
-scripts/install-skills --list
-scripts/install-skills
+```bash
+npx skills add pmdroid/skills
 ```
 
-That symlinks `skills/council` into `~/.agents/skills/council`.
+Global (all your projects):
 
-Claude Code / Cursor / Codex as well:
-
-```sh
-scripts/install-skills --all-homes
+```bash
+npx skills add pmdroid/skills -g
 ```
 
-Selected skill, other target, copies instead of symlinks:
+Just council, or list first:
 
-```sh
-scripts/install-skills council
-scripts/install-skills --target ~/.claude/skills
-scripts/install-skills --mode copy --target ~/.agents/skills
-scripts/install-skills --force council
-scripts/install-skills --dry-run --all-homes
+```bash
+npx skills add pmdroid/skills --skill council
+npx skills add pmdroid/skills --list
 ```
-
-Symlinks are best for local development: edits in this checkout show up immediately.
 
 ## Layout
 
@@ -42,8 +34,8 @@ skills/
   council/
     SKILL.md
     scripts/council
-scripts/
-  install-skills
 ```
 
-Each skill is a directory with `SKILL.md`. Helpers live in that skill's `scripts/`.
+## License
+
+MIT
