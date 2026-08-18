@@ -17,33 +17,41 @@ Set once, then use `"$COUNCIL"`:
 export COUNCIL="${COUNCIL:-$HOME/.agents/skills/council/scripts/council}"
 ```
 
-Claude Code: `$HOME/.claude/skills/council/scripts/council`.
-This checkout: `skills/council/scripts/council`.
+Same script if installed under `~/.claude/skills`, `~/.cursor/skills`, `~/.codex/skills`, or this checkout: `skills/council/scripts/council`.
 
-## Default panel
+## Panel
 
-| Seat | Engine | Model | Job |
-|---|---|---|---|
-| builder | `codex` | `gpt-5.6-sol` | Practical implementation and feasibility |
-| critic | `cursor` | `kimi-k3-max` | Risks, assumptions, alternatives, failure modes |
+Seats are roles, not models. Use **two different healthy engines**. More than two is fine.
 
-Swap engines freely (`claude`, `opencode`, or `--bin`). Roles are seats, not models. More than two planners is fine. `--model` overrides the engine default.
+Before round 1:
+
+```bash
+"$COUNCIL" engines --probe
+```
+
+`present` means the binary is on PATH. `--probe` runs a one-line ping and prints `ok`, `auth`, `quota`, `bad-model`, `empty`, `error`, or `timeout`.
+
+- Do not pass `--model` unless the user named one or probe proved that slug works. A hardcoded slug fails on logins that do not have it.
+- If `ask` exits non-zero or prints `council: empty reply`, move that seat to the next healthy engine. Same prompt. Empty stdout is not a reply.
+- When healthy, prefer distinct engines such as `grok`, `cursor`, `claude`, `codex`, or `opencode`.
+
+`--model` overrides the engine's own default. Replies are saved under `~/.council/runs/` (or `$COUNCIL_HOME/runs`). Pass `--session NAME` or `COUNCIL_SESSION` to group a panel.
 
 ## Run
 
 Prompt on stdin. One process, one planner, no shared state.
 
 ```bash
-"$COUNCIL" ask --engine codex <<'EOF'
+"$COUNCIL" ask --engine grok --session "$COUNCIL_SESSION" <<'EOF'
 <isolated builder prompt>
 EOF
 
-"$COUNCIL" ask --engine cursor <<'EOF'
+"$COUNCIL" ask --engine cursor --session "$COUNCIL_SESSION" <<'EOF'
 <isolated critic prompt>
 EOF
 ```
 
-Run the first round in parallel. Wait for both before reading either.
+Run the first round in parallel. Wait for both before reading either. If a seat fails, replace it before reading the other reply as a finished panel.
 
 ## Planner prompt
 
@@ -74,6 +82,9 @@ Reply with:
 - open questions
 - confidence 0-100
 
+Print those six sections to stdout. That print is the entire deliverable.
+Do not use tools, subagents, or plan-mode file writers.
+Do not inspect the repository unless Repository: says to.
 No chain-of-thought. No hidden reasoning.
 ```
 
@@ -90,7 +101,7 @@ Share **claims, questions, observations** — not transcripts. Never forward `Pl
 
 ## Loop
 
-1. Blind round: all planners, identical objective, nothing from each other.
+1. Probe engines. Blind round: all planners, identical objective, nothing from each other.
 2. Compare: agreement, disagreement, missing information.
 3. If needed, share selected insights and/or ask a follow-up. Still isolated.
 4. Stop after 3 planner rounds, or sooner when you can decide.

@@ -5,15 +5,25 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import shutil
 import subprocess
 import sys
+from datetime import datetime, timezone
+from pathlib import Path
 
-DEFAULT_MODELS = {
-    "codex": "gpt-5.6-sol",
-    "cursor": "kimi-k3-max",
-    "cursor-agent": "kimi-k3-max",
-}
+ENGINES: tuple[tuple[str, str], ...] = (
+    ("claude", "claude"),
+    ("codex", "codex"),
+    ("cursor", "cursor-agent"),
+    ("grok", "grok"),
+    ("opencode", "opencode"),
+)
+
+PROBE_PROMPT = (
+    "Reply with the single word pong and nothing else. Do not use tools."
+)
+PROBE_TIMEOUT_SEC = 45
 
 
 def main() -> int:
@@ -22,31 +32,61 @@ def main() -> int:
 
     ask = sub.add_parser("ask", help="run one isolated planner")
     ask.add_argument("--engine", required=True)
-    ask.add_argument("--model")
+    ask.add_argument("--model", help="only if the user named it or probe proved it")
     ask.add_argument("--cwd", default=".")
     ask.add_argument("--timeout", type=int, default=300)
     ask.add_argument("--bin", help="override executable")
+    ask.add_argument("--session", help="group saved replies under ~/.council/runs/NAME")
     ask.add_argument("--dry-run", action="store_true")
     ask.add_argument("prompt_args", nargs="*")
 
-    sub.add_parser("engines", help="list engines on PATH")
+    engines = sub.add_parser("engines", help="list engines on PATH")
+    engines.add_argument(
+        "--probe",
+        action="store_true",
+        help="run a one-line ping (ok/auth/quota/empty/error/timeout)",
+    )
+    engines.add_argument("--timeout", type=int, default=PROBE_TIMEOUT_SEC)
     args = parser.parse_args()
     if args.cmd == "engines":
-        return list_engines()
+        return list_engines(probe=args.probe, timeout=args.timeout)
     return ask_engine(args)
 
 
-def list_engines() -> int:
-    for name, bin_name in (
-        ("claude", "claude"),
-        ("codex", "codex"),
-        ("opencode", "opencode"),
-        ("cursor", "cursor-agent"),
-    ):
+def list_engines(*, probe: bool, timeout: int) -> int:
+    for name, bin_name in ENGINES:
         path = shutil.which(bin_name)
-        model = DEFAULT_MODELS.get(name, "")
-        print(f"{name:10} {'ok' if path else 'missing':7} {model:14} {path or ''}".rstrip())
+        if not path:
+            print(f"{name:10} missing")
+            continue
+        if not probe:
+            print(f"{name:10} present  {path}")
+            continue
+        status, note = probe_engine(name, timeout=timeout)
+        extra = f"  {note}" if note else ""
+        print(f"{name:10} {status:8} {path}{extra}")
     return 0
+
+
+def probe_engine(engine: str, timeout: int) -> tuple[str, str]:
+    result = run_planner(
+        engine=engine,
+        prompt=PROBE_PROMPT,
+        model=None,
+        cwd=".",
+        timeout=timeout,
+        override_bin=None,
+    )
+    if result.kind == "timeout":
+        return "timeout", f"after {timeout}s"
+    if result.kind == "missing":
+        return "missing", result.detail
+    note = first_line(result.stderr) or first_line(result.stdout)
+    if result.code != 0:
+        return classify_error(result.stderr + "\n" + result.stdout), note
+    if is_empty_reply(result.stdout):
+        return "empty", note or "exit 0, no stdout"
+    return "ok", ""
 
 
 def ask_engine(args: argparse.Namespace) -> int:
@@ -57,7 +97,7 @@ def ask_engine(args: argparse.Namespace) -> int:
 
     argv, use_stdin = build_argv(
         args.engine,
-        args.model or DEFAULT_MODELS.get(args.engine),
+        args.model,
         args.bin,
         args.cwd,
     )
@@ -65,30 +105,183 @@ def ask_engine(args: argparse.Namespace) -> int:
         shown = [*argv, "<stdin>"] if use_stdin else [*argv, "<prompt>"]
         print(" ".join(shown))
         return 0
+
+    result = run_planner(
+        engine=args.engine,
+        prompt=prompt,
+        model=args.model,
+        cwd=args.cwd,
+        timeout=args.timeout,
+        override_bin=args.bin,
+    )
+    session = args.session or os.environ.get("COUNCIL_SESSION")
+    saved = persist_reply(
+        session=session,
+        engine=args.engine,
+        model=args.model,
+        stdout=result.stdout,
+        stderr=result.stderr,
+        code=result.code if result.kind == "ran" else None,
+        detail=result.detail or result.kind,
+    )
+    if saved:
+        print(f"council: saved {saved}", file=sys.stderr)
+
+    if result.kind == "missing":
+        print(f"council: executable not found: {result.detail}", file=sys.stderr)
+        return 127
+    if result.kind == "timeout":
+        print(f"council: timed out after {args.timeout}s", file=sys.stderr)
+        return 124
+    if result.code != 0:
+        sys.stderr.write(result.stderr)
+        if result.stdout.strip():
+            sys.stdout.write(result.stdout)
+        return result.code
+    if is_empty_reply(result.stdout):
+        sys.stderr.write(result.stderr)
+        print("council: empty reply", file=sys.stderr)
+        return 3
+    sys.stdout.write(result.stdout)
+    return 0
+
+
+class PlannerResult:
+    def __init__(
+        self,
+        *,
+        kind: str,
+        code: int = 0,
+        stdout: str = "",
+        stderr: str = "",
+        detail: str = "",
+    ) -> None:
+        self.kind = kind
+        self.code = code
+        self.stdout = stdout
+        self.stderr = stderr
+        self.detail = detail
+
+
+def run_planner(
+    *,
+    engine: str,
+    prompt: str,
+    model: str | None,
+    cwd: str,
+    timeout: int,
+    override_bin: str | None,
+) -> PlannerResult:
+    argv, use_stdin = build_argv(engine, model, override_bin, cwd)
     if not use_stdin:
         argv = [*argv, prompt]
     try:
-        result = subprocess.run(
+        completed = subprocess.run(
             argv,
-            cwd=args.cwd,
+            cwd=cwd,
             input=prompt if use_stdin else None,
             text=True,
             capture_output=True,
-            timeout=args.timeout,
+            timeout=timeout,
             env=os.environ.copy(),
         )
-    except FileNotFoundError:
-        print(f"council: executable not found: {argv[0]}", file=sys.stderr)
-        return 127
+    except FileNotFoundError as exc:
+        return PlannerResult(kind="missing", detail=str(exc.filename or argv[0]))
     except subprocess.TimeoutExpired:
-        print(f"council: timed out after {args.timeout}s", file=sys.stderr)
-        return 124
+        return PlannerResult(kind="timeout")
+    return PlannerResult(
+        kind="ran",
+        code=completed.returncode,
+        stdout=completed.stdout or "",
+        stderr=completed.stderr or "",
+    )
 
-    sys.stdout.write(result.stdout)
-    if result.returncode != 0 and not result.stdout.strip():
-        sys.stderr.write(result.stderr)
-        return result.returncode
-    return 0
+
+def is_empty_reply(text: str) -> bool:
+    return not (text or "").strip()
+
+
+def classify_error(text: str) -> str:
+    t = text.lower()
+    if any(
+        needle in t
+        for needle in (
+            "oauth",
+            "unauthorized",
+            "unauthorised",
+            "not logged in",
+            "please log in",
+            "please login",
+            "session expired",
+            "failed to authenticate",
+        )
+    ):
+        return "auth"
+    if any(needle in t for needle in ("usage limit", "rate limit", "quota")):
+        return "quota"
+    if any(
+        needle in t
+        for needle in (
+            "model is not supported",
+            "unknown model",
+            "does not exist",
+        )
+    ):
+        return "bad-model"
+    return "error"
+
+
+def first_line(text: str) -> str:
+    for line in (text or "").splitlines():
+        stripped = line.strip()
+        if stripped:
+            return stripped[:120]
+    return ""
+
+
+def persist_reply(
+    *,
+    session: str | None,
+    engine: str,
+    model: str | None,
+    stdout: str,
+    stderr: str,
+    code: int | None,
+    detail: str,
+) -> Path | None:
+    home = Path(os.environ.get("COUNCIL_HOME", Path.home() / ".council"))
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    run_dir = home / "runs" / (session or stamp)
+    try:
+        run_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        print(f"council: could not save reply: {exc}", file=sys.stderr)
+        return None
+    base = reply_slug(engine, model)
+    path = unique_path(run_dir, base, ".md")
+    path.write_text(stdout)
+    if (stderr or "").strip():
+        path.with_suffix(".err").write_text(stderr)
+    path.with_suffix(".meta").write_text(
+        f"engine={engine}\nmodel={model or ''}\ncode={code if code is not None else detail}\n"
+    )
+    return path
+
+
+def reply_slug(engine: str, model: str | None) -> str:
+    if not model:
+        return engine
+    safe = re.sub(r"[^a-zA-Z0-9._+-]+", "-", model).strip("-")
+    return f"{engine}-{safe}" if safe else engine
+
+
+def unique_path(directory: Path, base: str, suffix: str) -> Path:
+    candidate = directory / f"{base}{suffix}"
+    n = 2
+    while candidate.exists():
+        candidate = directory / f"{base}-{n}{suffix}"
+        n += 1
+    return candidate
 
 
 def build_argv(
@@ -96,7 +289,13 @@ def build_argv(
 ) -> tuple[list[str], bool]:
     bin_name = override_bin
     if engine in {"claude", "claude-code"}:
-        argv = [bin_name or "claude", "-p", "--output-format", "text", "--dangerously-skip-permissions"]
+        argv = [
+            bin_name or "claude",
+            "-p",
+            "--output-format",
+            "text",
+            "--dangerously-skip-permissions",
+        ]
         if model:
             argv += ["--model", model]
         return argv, False
@@ -113,6 +312,25 @@ def build_argv(
             argv += ["-C", cwd]
         argv.append("-")
         return argv, True
+    if engine in {"grok", "grok-build"}:
+        argv = [
+            bin_name or "grok",
+            "-p",
+            "--output-format",
+            "plain",
+            "--permission-mode",
+            "dontAsk",
+            "--no-plan",
+            "--no-subagents",
+            "--disable-web-search",
+            "--max-turns",
+            "1",
+        ]
+        if model:
+            argv += ["-m", model]
+        if cwd and cwd != ".":
+            argv += ["--cwd", cwd]
+        return argv, False
     if engine == "opencode":
         argv = [bin_name or "opencode", "run", "--auto"]
         if model:
@@ -121,7 +339,16 @@ def build_argv(
             argv += ["--dir", cwd]
         return argv, False
     if engine in {"cursor", "cursor-agent"}:
-        argv = [bin_name or "cursor-agent", "-p", "--force", "--trust", "--mode", "plan"]
+        argv = [
+            bin_name or "cursor-agent",
+            "-p",
+            "--output-format",
+            "text",
+            "--force",
+            "--trust",
+            "--mode",
+            "ask",
+        ]
         if model:
             argv += ["--model", model]
         if cwd and cwd != ".":
