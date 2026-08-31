@@ -7,6 +7,7 @@ Skills for AI coding agents. Follows the [Agent Skills](https://agentskills.io/)
 ## Skills
 
 - `council` — isolated multi-agent planning. Planners never share context; the host orchestrates.
+- `triage` — turn an incoming bug report into a verdict. A council of four seats verifies the claim, finds the cause, sizes the blast radius, and checks prior art. Builds on `council`.
 
 ## Install
 
@@ -20,12 +21,14 @@ Global (all your projects):
 npx skills add pmdroid/skills -g
 ```
 
-Just council, or list first:
+One skill, or list first:
 
 ```bash
 npx skills add pmdroid/skills --skill council
 npx skills add pmdroid/skills --list
 ```
+
+`triage` calls the `council` script, so install both.
 
 ## Layout
 
@@ -34,6 +37,9 @@ skills/
   council/
     SKILL.md
     scripts/council
+  triage/
+    SKILL.md
+    SIGNALS.md
 ```
 
 ## License
